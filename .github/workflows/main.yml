@@ -67,18 +67,25 @@ jobs:
         with:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
-          cache: gradle
 
-      - name: Cache Buildozer, Gradle and Android platform
+      - name: Cache Gradle manually
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/build.gradle*', '**/settings.gradle*', '**/gradle-wrapper.properties', 'buildozer.spec') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Cache Buildozer and Android platform
         uses: actions/cache@v4
         with:
           path: |
             ~/.buildozer
-            ~/.gradle
             .buildozer/android/platform
-          key: ${{ runner.os }}-android-${{ hashFiles('buildozer.spec', 'requirements.txt', 'pyproject.toml', 'setup.py', '**/*.gradle*', '**/gradle-wrapper.properties') }}
+          key: ${{ runner.os }}-android-${{ hashFiles('buildozer.spec', 'requirements.txt', 'pyproject.toml', 'setup.py') }}
           restore-keys: |
-            ${{ runner.os }}-android-${{ hashFiles('buildozer.spec') }}-
             ${{ runner.os }}-android-
 
       - name: Install system dependencies
