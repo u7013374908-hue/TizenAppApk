@@ -141,7 +141,7 @@ jobs:
           echo "SHA256: $(sha256sum $APK_FILE | cut -d' ' -f1)"
 
       - name: Upload APK artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: success()
         with:
           name: tizencommander-apk-debug
@@ -201,7 +201,7 @@ jobs:
 
       - name: Upload build logs on failure
         if: failure()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: build-logs
           path: .buildozer/
