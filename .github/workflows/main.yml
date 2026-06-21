@@ -24,7 +24,7 @@ env:
   JAVA_VERSION: "17"
   ANDROID_API_LEVEL: "35"
   ANDROID_BUILD_TOOLS: "35.0.0"
-  ANDROID_NDK_VERSION: "27.2.12479018"
+  ANDROID_NDK_PRIMARY: "27.2.12479018"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PIP_NO_CACHE_DIR: "false"
 
@@ -42,15 +42,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -f buildozer.spec
-          echo "buildozer.spec found"
-          grep -E '^(title|package.name|version|requirements|android.api|android.arch)\s*=' buildozer.spec || true
+          if [ ! -f buildozer.spec ]; then
+            echo "ERROR: buildozer.spec not found in repository root."
+            exit 1
+          fi
+          echo "buildozer.spec found."
+          grep -E '^(title|package.name|version|requirements|android.api|android.archs|android.accept_sdk_license)\s*=' buildozer.spec || true
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt', 'pyproject.toml', 'setup.py', 'buildozer.spec') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -58,6 +68,18 @@ jobs:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
           cache: gradle
+
+      - name: Cache Buildozer, Gradle and Android platform
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            ~/.gradle
+            .buildozer/android/platform
+          key: ${{ runner.os }}-android-${{ hashFiles('buildozer.spec', 'requirements.txt', 'pyproject.toml', 'setup.py', '**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-android-${{ hashFiles('buildozer.spec') }}-
+            ${{ runner.os }}-android-
 
       - name: Install system dependencies
         shell: bash
@@ -77,18 +99,6 @@ jobs:
             libssl-dev \
             ccache
 
-      - name: Cache Buildozer and Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.buildozer
-            ~/.gradle
-            .buildozer/android/platform
-          key: ${{ runner.os }}-buildozer-${{ hashFiles('buildozer.spec', 'requirements.txt', 'pyproject.toml', 'setup.py', '**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-buildozer-${{ hashFiles('buildozer.spec') }}-
-            ${{ runner.os }}-buildozer-
-
       - name: Install Python packages
         shell: bash
         run: |
@@ -99,28 +109,34 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Set Android environment
+      - name: Configure Android environment
         shell: bash
         run: |
           set -euo pipefail
-          echo "ANDROID_HOME=$HOME/.buildozer/android/platform/android-sdk" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$HOME/.buildozer/android/platform/android-sdk" >> "$GITHUB_ENV"
-          echo "$HOME/.buildozer/android/platform/android-sdk/platform-tools" >> "$GITHUB_PATH"
-          echo "$HOME/.buildozer/android/platform/android-sdk/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          ANDROID_SDK_ROOT="$HOME/.buildozer/android/platform/android-sdk"
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
 
-      - name: Write SDK license hashes
+      - name: Write Android licenses
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$HOME/.buildozer/android/platform/android-sdk/licenses"
-          cat > "$HOME/.buildozer/android/platform/android-sdk/licenses/android-sdk-license" <<'EOF'
+          SDK_ROOT="$HOME/.buildozer/android/platform/android-sdk"
+          mkdir -p "$SDK_ROOT/licenses"
+
+          cat > "$SDK_ROOT/licenses/android-sdk-license" <<'EOF'
           8933bad161af4178b1185d1a37fbf41ea5269c55
           d56f51874737515e19135a98a04b396736868846
           24333f8a63b6825ea9c5514f83c2829b004d1fee
           EOF
-          cat > "$HOME/.buildozer/android/platform/android-sdk/licenses/android-sdk-preview-license" <<'EOF'
+
+          cat > "$SDK_ROOT/licenses/android-sdk-preview-license" <<'EOF'
           8933bad161af4178b1185d1a37fbf41ea5269c55
           EOF
+
+          ls -lah "$SDK_ROOT/licenses"
 
       - name: Install Android packages with NDK fallback
         shell: bash
@@ -130,19 +146,12 @@ jobs:
           export ANDROID_SDK_ROOT="$SDK_ROOT"
           export ANDROID_HOME="$SDK_ROOT"
 
-          NDK_PRIMARY="${ANDROID_NDK_VERSION}"
-          NDK_FALLBACKS="27.0.12077973 26.1.10909125 25.2.9519653"
-
-          install_ndk() {
-            for ver in $NDK_PRIMARY $NDK_FALLBACKS; do
-              if sdkmanager --sdk_root="$SDK_ROOT" "ndk;$ver" >/dev/null 2>&1; then
-                echo "ANDROID_NDK_ROOT=$SDK_ROOT/ndk/$ver" >> "$GITHUB_ENV"
-                echo "Selected NDK: $ver"
-                return 0
-              fi
-            done
-            return 1
-          }
+          candidates=(
+            "${ANDROID_NDK_PRIMARY}"
+            "27.0.12077973"
+            "26.1.10909125"
+            "25.2.9519653"
+          )
 
           yes | sdkmanager --sdk_root="$SDK_ROOT" --licenses || true
           sdkmanager --sdk_root="$SDK_ROOT" \
@@ -151,10 +160,21 @@ jobs:
             "build-tools;${ANDROID_BUILD_TOOLS}" \
             "cmdline-tools;latest" || true
 
-          install_ndk || {
-            echo "ERROR: No compatible NDK could be installed."
+          selected_ndk=""
+          for ndk in "${candidates[@]}"; do
+            if sdkmanager --sdk_root="$SDK_ROOT" "ndk;${ndk}" >/dev/null 2>&1; then
+              selected_ndk="$SDK_ROOT/ndk/${ndk}"
+              break
+            fi
+          done
+
+          if [ -z "$selected_ndk" ]; then
+            echo "ERROR: Unable to install any compatible NDK."
             exit 1
-          }
+          fi
+
+          echo "ANDROID_NDK_ROOT=$selected_ndk" >> "$GITHUB_ENV"
+          echo "Selected NDK: $selected_ndk"
 
       - name: Build APK
         shell: bash
@@ -173,7 +193,12 @@ jobs:
         run: |
           set -euo pipefail
           APK_FILE="$(find bin -maxdepth 1 -name '*.apk' | head -n 1)"
-          test -n "$APK_FILE"
+          if [ -z "${APK_FILE:-}" ]; then
+            echo "ERROR: no APK found in bin/"
+            ls -lah bin || true
+            exit 1
+          fi
+          echo "APK: $APK_FILE"
           ls -lh "$APK_FILE"
           unzip -t "$APK_FILE" >/dev/null
 
@@ -184,16 +209,30 @@ jobs:
           path: bin/*.apk
           retention-days: 30
           if-no-files-found: error
+          compression-level: 0
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: ncipollo/release-action@v1
         with:
           artifacts: bin/*.apk
-          generateReleaseNotes: true
           tag: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
+          generateReleaseNotes: true
           body: |
             Android APK automatic release
             Commit: ${{ github.sha }}
             Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+      - name: Build summary
+        if: always()
+        shell: bash
+        run: |
+          echo "Workflow status: ${{ job.status }}"
+          echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if ls bin/*.apk >/dev/null 2>&1; then
+            echo "APK generated successfully."
+            ls -lh bin/*.apk
+          else
+            echo "APK not generated."
+          fi
