@@ -20,24 +20,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Java (no Gradle cache)
+      - name: Setup Java
         uses: actions/setup-java@v3
         with:
           distribution: "temurin"
           java-version: "17"
-          # removed: cache: "gradle"  <-- avoid error when repo has no gradle files
+          cache: "gradle"
 
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.11"
           cache: "pip"
-
-      - name: Show basic env
-        run: |
-          echo "JAVA_HOME=$JAVA_HOME"
-          echo "Python: $(python --version)"
-          echo "PATH=$PATH"
 
       - name: Install system dependencies
         run: |
@@ -51,46 +45,66 @@ jobs:
             git \
             wget \
             unzip \
-            ccache \
-            zip \
-            unzip
+            ccache
 
-      - name: Setup Android SDK
+      - name: Setup Android SDK (cmdline-tools)
         uses: android-actions/setup-android@v3
         with:
           api-level: 35
           ndk-version: 27.b
           build-tools-version: 35.0.0
 
-      - name: Install Python dependencies (buildozer etc.)
+      - name: Configure Android environment
+        run: |
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.b" >> $GITHUB_ENV
+          echo "$ANDROID_HOME/tools:$ANDROID_HOME/tools/bin:$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
+
+      - name: Configure and install Android SDK packages (non-interactive)
+        run: |
+          set -e
+          ANDROID_SDK_ROOT="$HOME/.buildozer/android/platform/android-sdk"
+          export ANDROID_SDK_ROOT
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/tools/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+
+          # If sdkmanager not available yet, try to use the cmdline-tools installed by setup-android
+          if ! command -v sdkmanager >/dev/null 2>&1; then
+            if [ -f "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+              ln -s "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "$HOME/.local/bin/sdkmanager" || true
+              export PATH="$HOME/.local/bin:$PATH"
+            fi
+          fi
+
+          # Install required SDK components and build-tools non-interactively
+          yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --install "platform-tools" "platforms;android-35" "build-tools;37.0.0" "cmdline-tools;latest" || true
+
+          # Accept all licenses
+          yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses || true
+
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          # install into user site to avoid permission issues and add ~/.local/bin to PATH
-          python -m pip install --user buildozer cython flet requests pexpect
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-        env:
-          PIP_NO_CACHE_DIR: "off"
-
-      - name: Verify buildozer available
-        run: |
-          which buildozer || true
-          buildozer --version || echo "buildozer not in PATH or failed to run"
+          pip install \
+            buildozer \
+            cython \
+            flet \
+            requests \
+            pexpect
 
       - name: Verify buildozer.spec
         run: |
           if [ ! -f buildozer.spec ]; then
             echo "ERROR: buildozer.spec not found!"
-            ls -la
             exit 1
           fi
           echo "✓ buildozer.spec found"
+          echo "Configuration:"
           grep -E "^(title|package.name|version|android.api|android.arch)" buildozer.spec || true
 
       - name: Build APK
         run: |
           mkdir -p bin
-          # ensure ~/.local/bin is on PATH for this step too
-          export PATH="$HOME/.local/bin:$PATH"
           buildozer android debug --verbose --require="python3,flet,requests"
         env:
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
@@ -100,11 +114,22 @@ jobs:
       - name: Verify APK build
         run: |
           echo "=== Checking APK output ==="
-          ls -lh bin/*.apk 2>/dev/null || { echo "ERROR: No APK found in bin/"; ls -la bin/ || true; exit 1; }
+          ls -lh bin/*.apk 2>/dev/null || {
+            echo "ERROR: No APK found in bin/"
+            ls -la bin/
+            exit 1
+          }
+
           APK_FILE=$(ls bin/*.apk | head -1)
           echo "✓ APK built: $APK_FILE"
           echo "Size: $(du -h "$APK_FILE" | cut -f1)"
-          unzip -t "$APK_FILE" > /dev/null 2>&1 || { echo "ERROR: APK integrity check failed"; exit 1; }
+
+          if unzip -t "$APK_FILE" > /dev/null 2>&1; then
+            echo "✓ APK integrity verified"
+          else
+            echo "ERROR: APK integrity check failed"
+            exit 1
+          fi
 
       - name: Extract APK information
         run: |
@@ -116,7 +141,7 @@ jobs:
           echo "SHA256: $(sha256sum $APK_FILE | cut -d' ' -f1)"
 
       - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         if: success()
         with:
           name: tizencommander-apk-debug
@@ -132,6 +157,7 @@ jobs:
           tag: v1.0.0-${{ github.run_number }}
           body: |
             ## TizenCommander APK Release
+
             **Build**: ${{ github.run_number }}
             **Commit**: ${{ github.sha }}
             **Branch**: ${{ github.ref }}
@@ -142,3 +168,43 @@ jobs:
           echo "=== BUILD SUMMARY ==="
           echo "Status: ${{ job.status }}"
           echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          if ls bin/*.apk 1> /dev/null 2>&1; then
+            echo "✓ APK successfully built"
+            ls -lh bin/*.apk
+          else
+            echo "✗ APK build failed"
+            exit 1
+          fi
+
+      - name: Collect build logs on failure
+        if: failure()
+        run: |
+          echo "=== Build Environment ==="
+          echo "Java version:"
+          java -version || true
+
+          echo -e "\n=== Python version ==="
+          python --version || true
+
+          echo -e "\n=== Buildozer version ==="
+          buildozer --version || true
+
+          echo -e "\n=== Android SDK ==="
+          echo "ANDROID_SDK_ROOT: $ANDROID_SDK_ROOT" || true
+
+          echo -e "\n=== Build directory contents ==="
+          ls -la .buildozer/android/platform/ 2>/dev/null || echo "Build dir not yet created"
+
+          echo -e "\n=== Last 100 lines of build output ==="
+          tail -n 100 .buildozer/android/platform/android-*/build/ 2>/dev/null || echo "Build log not found"
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-logs
+          path: .buildozer/
+          retention-days: 7
+
+# Workflow notes: This job installs Android SDK components non-interactively (accepting licenses) before running Buildozer.
