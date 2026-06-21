@@ -1,0 +1,1 @@
+flet requests buildozer pexpect cython setuptools wheel
