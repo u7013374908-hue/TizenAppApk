@@ -1,0 +1,144 @@
+name: Build TizenCommander APK
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Java (no Gradle cache)
+        uses: actions/setup-java@v3
+        with:
+          distribution: "temurin"
+          java-version: "17"
+          # removed: cache: "gradle"  <-- avoid error when repo has no gradle files
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Show basic env
+        run: |
+          echo "JAVA_HOME=$JAVA_HOME"
+          echo "Python: $(python --version)"
+          echo "PATH=$PATH"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libssl-dev \
+            libffi-dev \
+            python3-dev \
+            default-jdk \
+            git \
+            wget \
+            unzip \
+            ccache \
+            zip \
+            unzip
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 35
+          ndk-version: 27.b
+          build-tools-version: 35.0.0
+
+      - name: Install Python dependencies (buildozer etc.)
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          # install into user site to avoid permission issues and add ~/.local/bin to PATH
+          python -m pip install --user buildozer cython flet requests pexpect
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+        env:
+          PIP_NO_CACHE_DIR: "off"
+
+      - name: Verify buildozer available
+        run: |
+          which buildozer || true
+          buildozer --version || echo "buildozer not in PATH or failed to run"
+
+      - name: Verify buildozer.spec
+        run: |
+          if [ ! -f buildozer.spec ]; then
+            echo "ERROR: buildozer.spec not found!"
+            ls -la
+            exit 1
+          fi
+          echo "✓ buildozer.spec found"
+          grep -E "^(title|package.name|version|android.api|android.arch)" buildozer.spec || true
+
+      - name: Build APK
+        run: |
+          mkdir -p bin
+          # ensure ~/.local/bin is on PATH for this step too
+          export PATH="$HOME/.local/bin:$PATH"
+          buildozer android debug --verbose --require="python3,flet,requests"
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_ROOT }}
+          JAVA_HOME: ${{ env.JAVA_HOME }}
+
+      - name: Verify APK build
+        run: |
+          echo "=== Checking APK output ==="
+          ls -lh bin/*.apk 2>/dev/null || { echo "ERROR: No APK found in bin/"; ls -la bin/ || true; exit 1; }
+          APK_FILE=$(ls bin/*.apk | head -1)
+          echo "✓ APK built: $APK_FILE"
+          echo "Size: $(du -h "$APK_FILE" | cut -f1)"
+          unzip -t "$APK_FILE" > /dev/null 2>&1 || { echo "ERROR: APK integrity check failed"; exit 1; }
+
+      - name: Extract APK information
+        run: |
+          APK_FILE=$(ls bin/*.apk | head -1)
+          echo "=== APK Information ==="
+          echo "File: $(basename $APK_FILE)"
+          echo "Size: $(du -h $APK_FILE | cut -f1)"
+          echo "MD5: $(md5sum $APK_FILE | cut -d' ' -f1)"
+          echo "SHA256: $(sha256sum $APK_FILE | cut -d' ' -f1)"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: tizencommander-apk-debug
+          path: bin/*.apk
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: bin/*.apk
+          tag: v1.0.0-${{ github.run_number }}
+          body: |
+            ## TizenCommander APK Release
+            **Build**: ${{ github.run_number }}
+            **Commit**: ${{ github.sha }}
+            **Branch**: ${{ github.ref }}
+
+      - name: Build summary
+        if: always()
+        run: |
+          echo "=== BUILD SUMMARY ==="
+          echo "Status: ${{ job.status }}"
+          echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
