@@ -25,6 +25,7 @@ env:
   ANDROID_API_LEVEL: "35"
   ANDROID_BUILD_TOOLS: "35.0.0"
   ANDROID_NDK_PRIMARY: "28.0.12433566"
+  ANDROID_CMDLINE_TOOLS_URL: "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PIP_NO_CACHE_DIR: "false"
 
@@ -113,63 +114,66 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel
           pip install buildozer cython pexpect flet requests
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Configure Android environment and sdkmanager symlink
+      - name: Prepare Android SDK directory
         shell: bash
         run: |
           set -euo pipefail
           SDK_ROOT="$HOME/.buildozer/android/platform/android-sdk"
-          mkdir -p "$SDK_ROOT/cmdline-tools/latest/bin"
+          mkdir -p "$SDK_ROOT/cmdline-tools"
           mkdir -p "$SDK_ROOT/tools/bin"
-
-          if [ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
-            ln -sf "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "$SDK_ROOT/tools/bin/sdkmanager"
-          fi
-
+          mkdir -p "$SDK_ROOT/licenses"
           echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
           echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "$SDK_ROOT/tools/bin" >> "$GITHUB_PATH"
 
+      - name: Download Android command line tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="$HOME/.buildozer/android/platform/android-sdk"
+          TMP_ZIP="$RUNNER_TEMP/cmdline-tools.zip"
+          rm -f "$TMP_ZIP"
+          curl -fsSL "${ANDROID_CMDLINE_TOOLS_URL}" -o "$TMP_ZIP"
+          rm -rf "$SDK_ROOT/cmdline-tools/latest"
+          mkdir -p "$SDK_ROOT/cmdline-tools/latest"
+          unzip -q "$TMP_ZIP" -d "$RUNNER_TEMP/cmdline-tools"
+          if [ -d "$RUNNER_TEMP/cmdline-tools/cmdline-tools" ]; then
+            mv "$RUNNER_TEMP/cmdline-tools/cmdline-tools/"* "$SDK_ROOT/cmdline-tools/latest/"
+          else
+            echo "ERROR: cmdline-tools archive layout unexpected."
+            find "$RUNNER_TEMP/cmdline-tools" -maxdepth 2 -type f | head -n 50
+            exit 1
+          fi
+          ln -sf "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "$SDK_ROOT/tools/bin/sdkmanager"
+          chmod +x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" || true
+          ls -lah "$SDK_ROOT/cmdline-tools/latest/bin"
+          test -x "$SDK_ROOT/tools/bin/sdkmanager"
+
       - name: Write Android licenses
         shell: bash
         run: |
           set -euo pipefail
           SDK_ROOT="$HOME/.buildozer/android/platform/android-sdk"
-          mkdir -p "$SDK_ROOT/licenses"
-
           cat > "$SDK_ROOT/licenses/android-sdk-license" <<'EOF'
           8933bad161af4178b1185d1a37fbf41ea5269c55
           d56f51874737515e19135a98a04b396736868846
           24333f8a63b6825ea9c5514f83c2829b004d1fee
           EOF
-
           cat > "$SDK_ROOT/licenses/android-sdk-preview-license" <<'EOF'
           8933bad161af4178b1185d1a37fbf41ea5269c55
           EOF
-
           ls -lah "$SDK_ROOT/licenses"
 
-      - name: Install Android packages with NDK fallback
+      - name: Install Android packages
         shell: bash
         run: |
           set -euo pipefail
           SDK_ROOT="$HOME/.buildozer/android/platform/android-sdk"
-          export ANDROID_SDK_ROOT="$SDK_ROOT"
           export ANDROID_HOME="$SDK_ROOT"
+          export ANDROID_SDK_ROOT="$SDK_ROOT"
           export PATH="$SDK_ROOT/cmdline-tools/latest/bin:$SDK_ROOT/tools/bin:$SDK_ROOT/platform-tools:$PATH"
-
-          candidates=(
-            "${ANDROID_NDK_PRIMARY}"
-            "28c"
-            "27.2.12479018"
-            "27.0.12077973"
-            "26.1.10909125"
-            "25.2.9519653"
-          )
 
           yes | sdkmanager --sdk_root="$SDK_ROOT" --licenses || true
           sdkmanager --sdk_root="$SDK_ROOT" \
@@ -178,21 +182,20 @@ jobs:
             "build-tools;${ANDROID_BUILD_TOOLS}" \
             "cmdline-tools;latest" || true
 
-          selected_ndk=""
-          for ndk in "${candidates[@]}"; do
-            if sdkmanager --sdk_root="$SDK_ROOT" "ndk;${ndk}" >/dev/null 2>&1; then
-              selected_ndk="$SDK_ROOT/ndk/${ndk}"
-              break
-            fi
-          done
-
-          if [ -z "$selected_ndk" ]; then
-            echo "ERROR: Unable to install any compatible NDK."
-            exit 1
+          if sdkmanager --sdk_root="$SDK_ROOT" "ndk;${ANDROID_NDK_PRIMARY}" >/dev/null 2>&1; then
+            echo "ANDROID_NDK_ROOT=$SDK_ROOT/ndk/${ANDROID_NDK_PRIMARY}" >> "$GITHUB_ENV"
+            echo "Selected NDK: ${ANDROID_NDK_PRIMARY}"
+          else
+            for ndk in 28c 27.2.12479018 27.0.12077973 26.1.10909125 25.2.9519653; do
+              if sdkmanager --sdk_root="$SDK_ROOT" "ndk;${ndk}" >/dev/null 2>&1; then
+                echo "ANDROID_NDK_ROOT=$SDK_ROOT/ndk/${ndk}" >> "$GITHUB_ENV"
+                echo "Selected NDK: ${ndk}"
+                break
+              fi
+            done
           fi
 
-          echo "ANDROID_NDK_ROOT=$selected_ndk" >> "$GITHUB_ENV"
-          echo "Selected NDK: $selected_ndk"
+          test -n "${ANDROID_NDK_ROOT:-}"
 
       - name: Build APK
         shell: bash
