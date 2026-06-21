@@ -24,7 +24,7 @@ env:
   JAVA_VERSION: "17"
   ANDROID_API_LEVEL: "35"
   ANDROID_BUILD_TOOLS: "35.0.0"
-  ANDROID_NDK_PRIMARY: "27.2.12479018"
+  ANDROID_NDK_PRIMARY: "28.0.12433566"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PIP_NO_CACHE_DIR: "false"
 
@@ -116,15 +116,23 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Configure Android environment
+      - name: Configure Android environment and sdkmanager symlink
         shell: bash
         run: |
           set -euo pipefail
-          ANDROID_SDK_ROOT="$HOME/.buildozer/android/platform/android-sdk"
-          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
-          echo "$ANDROID_SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
-          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          SDK_ROOT="$HOME/.buildozer/android/platform/android-sdk"
+          mkdir -p "$SDK_ROOT/cmdline-tools/latest/bin"
+          mkdir -p "$SDK_ROOT/tools/bin"
+
+          if [ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            ln -sf "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "$SDK_ROOT/tools/bin/sdkmanager"
+          fi
+
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/tools/bin" >> "$GITHUB_PATH"
 
       - name: Write Android licenses
         shell: bash
@@ -152,9 +160,12 @@ jobs:
           SDK_ROOT="$HOME/.buildozer/android/platform/android-sdk"
           export ANDROID_SDK_ROOT="$SDK_ROOT"
           export ANDROID_HOME="$SDK_ROOT"
+          export PATH="$SDK_ROOT/cmdline-tools/latest/bin:$SDK_ROOT/tools/bin:$SDK_ROOT/platform-tools:$PATH"
 
           candidates=(
             "${ANDROID_NDK_PRIMARY}"
+            "28.0.12433566"
+            "27.2.12479018"
             "27.0.12077973"
             "26.1.10909125"
             "25.2.9519653"
